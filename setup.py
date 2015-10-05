@@ -58,6 +58,7 @@ setup_args = dict(
         [gpsdio.gpsdio_plugins]
         vectortile_generate_tree=gpsdio_vectortile.core:gpsdio_vectortile_generate_tree
         vectortile_generate_tiles=gpsdio_vectortile.core:gpsdio_vectortile_generate_tiles
+        vectortile_generate_headers=gpsdio_vectortile.core:gpsdio_vectortile_generate_headers
     ''',
     extras_require={
         'test': ['pytest', 'pytest-cov']

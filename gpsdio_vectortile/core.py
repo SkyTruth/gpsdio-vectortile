@@ -24,7 +24,7 @@ class QuadtreeNode(object):
 
     clustering_levels = 6
 
-    def __init__(self, bounds, filename = None, count = 0, is_source = False, hollow = False):
+    def __init__(self, bounds, filename = None, count = 0, is_source = False, hollow = False, colsByName = None):
         self.bounds = bounds
         self.bbox = self.bounds.get_bbox()
         self.filename = filename
@@ -33,6 +33,7 @@ class QuadtreeNode(object):
         self.count = count
         self.is_source = is_source
         self.hollow = hollow
+        self.colsByName = colsByName or {}
         self.children = None
 
         if self.filename is None:
@@ -45,6 +46,7 @@ class QuadtreeNode(object):
             "count": self.count,
             "is_source": self.is_source,
             "hollow": self.hollow,
+            "colsByName": self.colsByName,
             "children": self.children and [child.serialize() for child in self.children]
             }
 
@@ -63,6 +65,17 @@ class QuadtreeNode(object):
         print "Calculating length..."
         with gpsdio.open(self.filename) as f:
             for row in f:
+                for key, value in row.iteritems():
+                    if isinstance(value, datetime.datetime):
+                        value = float(value.strftime("%s"))
+                    if isinstance(value, (int, float, bool)):
+                        if key not in self.colsByName:
+                            self.colsByName[key] = {"min": value, "max": value}
+                        else:
+                            if value < self.colsByName[key]['min']:
+                                self.colsByName[key]['min'] = value
+                            if value > self.colsByName[key]['max']:
+                                self.colsByName[key]['max'] = value
                 self.count += 1
         return self
 
@@ -164,6 +177,100 @@ class QuadtreeNode(object):
 
         self.write_tile(clusters.values())
 
+    @property
+    def name(self):
+        return self.filename.split(".")[0]
+        
+    def generate_header(self):
+        with open("header", "w") as f:
+            f.write(json.dumps(
+                    {"colsByName": self.colsByName,
+                     "seriesTilesets": False,
+                     "tilesetName": self.name,
+                     "tilesetVersion": "0.0.1"
+                     }))
+
+    def generate_workspace(self):
+        time = datetime.datetime.fromtimestamp((self.colsByName['timestamp']['min'] + self.colsByName['timestamp']['max']) / 2.0).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        timeExtent = (self.colsByName['timestamp']['max'] - self.colsByName['timestamp']['min']) / 10
+
+        with open("workspace", "w") as f:
+            f.write(json.dumps(
+              {
+                "state": {
+                  "title": self.name,
+                  "offset": 20,
+                  "maxoffset": 100,
+                  "lat": 0.0,
+                  "lon": 0.0,
+                  "zoom":3,
+                  "time":{"__jsonclass__":["Date",time]},
+                  "timeExtent": timeExtent,
+                  "paused":True
+                },
+                "map": {
+                  "animations": [
+                    {
+                      "args": {
+                        "title": self.name,
+                        "visible": True,
+                        "source": {
+                          "type": "TiledBinFormat",
+                          "args": {
+                            "url": "./"
+                          }
+                        },
+                        "selections": {
+                          "selected": {
+                            "sortcols": ["seriesgroup"]
+                          },
+                          "hover": {
+                            "sortcols": ["seriesgroup"]
+                          }
+                        }
+                      },
+                      "type": "ClusterAnimation"
+                    }
+                  ],
+                  "options": {
+                    "mapTypeId": "roadmap",
+                    "styles": [
+                      {
+                        "featureType": "poi",
+                        "stylers": [
+                          {
+                            "visibility": "off"
+                          }
+                        ]
+                      },
+                      {
+                          "featureType": "administrative",
+                          "stylers": [{ "visibility": "simplified" }]
+                      },
+                      {
+                          "featureType": "administrative.country",
+                          "stylers": [
+                          { "visibility": "on" }
+                          ]
+                      },
+                      {
+                          "featureType": "road",
+                          "stylers": [
+                            { "visibility": "off" }
+                          ]
+                      },
+                      {
+                          "featureType": "landscape.natural",
+                          "stylers": [
+                            { "visibility": "off" }
+                          ]
+                      }
+                    ]
+                  }
+                }
+              }        
+              ))
+
 class Cluster(object):
     def __init__(self):
         self.counts = {}
@@ -207,6 +314,8 @@ class Cluster(object):
 
         else:
             for key, value in other.iteritems():
+                if isinstance(value, datetime.datetime):
+                    value = float(value.strftime("%s"))
                 if not isinstance(value, (int, float, bool)): continue
                 self._add_col(key)
                 self.counts[key] += 1
@@ -247,6 +356,13 @@ def gpsdio_vectortile_generate_tiles(ctx):
         tree = QuadtreeNode.deserialize(json.loads(f.read()))
     tree.generate_tiles()
 
+@click.command(name='vectortile-generate-headers')
+@click.pass_context
+def gpsdio_vectortile_generate_headers(ctx):
+    with open("tree.json") as f:
+        tree = QuadtreeNode.deserialize(json.loads(f.read()))
+    tree.generate_header()
+    tree.generate_workspace()
 
 if __name__ == '__main__':
     gpsdio_vectortile()
