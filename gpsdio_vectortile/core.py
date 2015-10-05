@@ -61,6 +61,7 @@ class Quadtree(object):
             "max_count": self.max_count,
             "remove": self.remove,
             "clustering_levels": self.clustering_levels,
+            "columns": self.columns,
             "filename": self.filename,
             "root": self.root.serialize()
             }
@@ -174,14 +175,27 @@ class QuadtreeNode(object):
                 f.write(cluster.get_cluster_row())
 
         with open(self.tile_filename, "w") as f:
+            def get_row(cluster):
+                row = cluster.get_row()
+                if self.tree.columns is not None:
+                    row = {key: value
+                           for key, value in row.iteritems()
+                           if key in self.tree.columns}
+                return row
+
             f.write(str(vectortile.Tile.fromdata(
-                        [cluster.get_row()
+                        [get_row(cluster)
                          for cluster in clusters], {})))
-        
 
     def generate_tile_from_source(self):
         with gpsdio.open(self.filename) as f:
             rows = list(f)
+        
+        if self.tree.columns is not None:
+            rows = [{key: value
+                     for (key, value) in row.iteritems()
+                     if key in self.tree.columns}
+                    for row in rows]
 
         self.write_tile([Cluster.from_row(row) for row in rows])
 
@@ -374,7 +388,7 @@ class Cluster(object):
 @click.argument("infile", metavar="INFILENAME")
 @click.pass_context
 def gpsdio_vectortile_generate_tree(ctx, infile):
-    tree = Quadtree(infile, columns=["timestamp", "latitude", "longitude"])
+    tree = Quadtree(infile, columns=["timestamp", "lat", "lon", "course", "speed"])
     tree.root.generate_tree()
     with open("tree.json", "w") as f:
         f.write(json.dumps(tree.serialize()))
