@@ -17,14 +17,65 @@ import json
 import os.path
 import math
 
-class QuadtreeNode(object):
+
+class Quadtree(object):
     max_depth = None
     max_count = 16000
     remove = True
 
     clustering_levels = 6
 
-    def __init__(self, bounds, filename = None, count = 0, is_source = False, hollow = False, colsByName = None):
+    columns = None
+
+    def __init__(self, filename, __bare__ = False, **kw):
+        self.filename = filename
+        for key, value in kw.iteritems():
+            setattr(self, key, value)
+
+        if __bare__: return
+
+        self.root = QuadtreeNode(self, vectortile.TileBounds(), filename, is_source=True)
+
+        print "Calculating length..."
+        with gpsdio.open(self.root.filename) as f:
+            for row in f:
+                for key, value in row.iteritems():
+                    if self.columns is not None and key not in self.columns:
+                        continue
+                    if isinstance(value, datetime.datetime):
+                        value = float(value.strftime("%s"))
+                    if isinstance(value, (int, float, bool)):
+                        if key not in self.root.colsByName:
+                            self.root.colsByName[key] = {"min": value, "max": value}
+                        else:
+                            if value < self.root.colsByName[key]['min']:
+                                self.root.colsByName[key]['min'] = value
+                            if value > self.root.colsByName[key]['max']:
+                                self.root.colsByName[key]['max'] = value
+                self.root.count += 1
+
+
+    def serialize(self):
+        return {
+            "max_depth": self.max_depth,
+            "max_count": self.max_count,
+            "remove": self.remove,
+            "clustering_levels": self.clustering_levels,
+            "filename": self.filename,
+            "root": self.root.serialize()
+            }
+
+    @classmethod
+    def deserialize(cls, spec):
+        root = spec.pop("root")
+        self = cls(spec.pop("filename"), __bare__ = True, **spec)
+        self.root = QuadtreeNode.deserialize(self, root)
+        return self
+
+
+class QuadtreeNode(object):
+    def __init__(self, tree, bounds, filename = None, count = 0, is_source = False, hollow = False, colsByName = None):
+        self.tree = tree
         self.bounds = bounds
         self.bbox = self.bounds.get_bbox()
         self.filename = filename
@@ -51,32 +102,12 @@ class QuadtreeNode(object):
             }
 
     @classmethod
-    def deserialize(cls, spec):
+    def deserialize(cls, tree, spec):
         children = spec.pop("children")
         spec['bounds'] = vectortile.TileBounds(spec['bounds'])
-        self = cls(**spec)
+        self = cls(tree, **spec)
         if children:
-            self.children = [cls.deserialize(child) for child in children]
-        return self
-
-    @classmethod
-    def from_source_file(cls, filename):
-        self = cls(vectortile.TileBounds(), filename, is_source=True)
-        print "Calculating length..."
-        with gpsdio.open(self.filename) as f:
-            for row in f:
-                for key, value in row.iteritems():
-                    if isinstance(value, datetime.datetime):
-                        value = float(value.strftime("%s"))
-                    if isinstance(value, (int, float, bool)):
-                        if key not in self.colsByName:
-                            self.colsByName[key] = {"min": value, "max": value}
-                        else:
-                            if value < self.colsByName[key]['min']:
-                                self.colsByName[key]['min'] = value
-                            if value > self.colsByName[key]['max']:
-                                self.colsByName[key]['max'] = value
-                self.count += 1
+            self.children = [cls.deserialize(tree, child) for child in children]
         return self
 
     def generate_children(self):
@@ -87,7 +118,7 @@ class QuadtreeNode(object):
 
         print "Generating children for %s (%s rows)" % (self.bbox, self.count)
 
-        self.children = [QuadtreeNode(b)
+        self.children = [QuadtreeNode(self.tree, b)
                          for b in self.bounds.get_children()]
 
         with gpsdio.open(self.filename) as f:
@@ -108,21 +139,21 @@ class QuadtreeNode(object):
 
     def generate_tree(self, max_depth = None):
         """Generates child files down to self.max_depth, or until each
-        file is smaller than self.max_count. Parent files are removed,
-        unless self.remove = False"""
+        file is smaller than self.tree.max_count. Parent files are removed,
+        unless self.tree.remove = False"""
 
         if max_depth is None:
-            max_depth = self.max_depth
+            max_depth = self.tree.max_depth
         else:
             max_depth -= 1
             if max_depth == 0:
                 return
         self.generate_children()
-        if self.remove and not self.is_source:
+        if self.tree.remove and not self.is_source:
             os.unlink(self.filename)
             self.hollow = True
         for child in self.children:
-            if child.count > self.max_count:
+            if child.count > self.tree.max_count:
                 child.generate_tree(max_depth)
 
     def generate_tiles(self):
@@ -160,12 +191,12 @@ class QuadtreeNode(object):
             with open(child.tile_filename) as f:
                 header, data = vectortile.Tile(f.read()).unpack()
                 for row in data:
-                    gridcode = str(vectortile.TileBounds.from_point(row['lon'], row['lat'], self.bounds.zoom_level + self.clustering_levels))
+                    gridcode = str(vectortile.TileBounds.from_point(row['lon'], row['lat'], self.bounds.zoom_level + self.tree.clustering_levels))
                     if gridcode not in clusters: clusters[gridcode] = Cluster()
                     clusters[gridcode] += row
 
         # Merge clusters until we have few enough for a tile
-        while len(clusters) > self.max_count:
+        while len(clusters) > self.tree.max_count:
             newclusters = {}
             for gridcode, cluster in clusters.iteritems():
                 gridcode = gridcode[:-1]
@@ -180,7 +211,7 @@ class QuadtreeNode(object):
     @property
     def name(self):
         return self.filename.split(".")[0]
-        
+    
     def generate_header(self):
         with open("header", "w") as f:
             f.write(json.dumps(
@@ -196,80 +227,80 @@ class QuadtreeNode(object):
 
         with open("workspace", "w") as f:
             f.write(json.dumps(
-              {
-                "state": {
-                  "title": self.name,
-                  "offset": 20,
-                  "maxoffset": 100,
-                  "lat": 0.0,
-                  "lon": 0.0,
-                  "zoom":3,
-                  "time":{"__jsonclass__":["Date",time]},
-                  "timeExtent": timeExtent,
-                  "paused":True
-                },
-                "map": {
-                  "animations": [
                     {
-                      "args": {
-                        "title": self.name,
-                        "visible": True,
-                        "source": {
-                          "type": "TiledBinFormat",
-                          "args": {
-                            "url": "./"
-                          }
-                        },
-                        "selections": {
-                          "selected": {
-                            "sortcols": ["seriesgroup"]
-                          },
-                          "hover": {
-                            "sortcols": ["seriesgroup"]
-                          }
-                        }
-                      },
-                      "type": "ClusterAnimation"
-                    }
-                  ],
-                  "options": {
-                    "mapTypeId": "roadmap",
-                    "styles": [
-                      {
-                        "featureType": "poi",
-                        "stylers": [
-                          {
-                            "visibility": "off"
-                          }
-                        ]
-                      },
-                      {
-                          "featureType": "administrative",
-                          "stylers": [{ "visibility": "simplified" }]
-                      },
-                      {
-                          "featureType": "administrative.country",
-                          "stylers": [
-                          { "visibility": "on" }
-                          ]
-                      },
-                      {
-                          "featureType": "road",
-                          "stylers": [
-                            { "visibility": "off" }
-                          ]
-                      },
-                      {
-                          "featureType": "landscape.natural",
-                          "stylers": [
-                            { "visibility": "off" }
-                          ]
-                      }
-                    ]
-                  }
-                }
-              }        
-              ))
+                        "state": {
+                            "title": self.name,
+                            "offset": 20,
+                            "maxoffset": 100,
+                            "lat": 0.0,
+                            "lon": 0.0,
+                            "zoom":3,
+                            "time":{"__jsonclass__":["Date",time]},
+                            "timeExtent": timeExtent,
+                            "paused":True
+                            },
+                        "map": {
+                            "animations": [
+                                {
+                                    "args": {
+                                        "title": self.name,
+                                        "visible": True,
+                                        "source": {
+                                            "type": "TiledBinFormat",
+                                            "args": {
+                                                "url": "./"
+                                                }
+                                            },
+                                        "selections": {
+                                            "selected": {
+                                                "sortcols": ["seriesgroup"]
+                                                },
+                                            "hover": {
+                                                "sortcols": ["seriesgroup"]
+                                                }
+                                            }
+                                        },
+                                    "type": "ClusterAnimation"
+                                    }
+                                ],
+                            "options": {
+                                "mapTypeId": "roadmap",
+                                "styles": [
+                                    {
+                                        "featureType": "poi",
+                                        "stylers": [
+                                            {
+                                                "visibility": "off"
+                                                }
+                                            ]
+                                        },
+                                    {
+                                        "featureType": "administrative",
+                                        "stylers": [{ "visibility": "simplified" }]
+                                        },
+                                    {
+                                        "featureType": "administrative.country",
+                                        "stylers": [
+                                            { "visibility": "on" }
+                                            ]
+                                        },
+                                    {
+                                        "featureType": "road",
+                                        "stylers": [
+                                            { "visibility": "off" }
+                                            ]
+                                        },
+                                    {
+                                        "featureType": "landscape.natural",
+                                        "stylers": [
+                                            { "visibility": "off" }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        }        
+                    ))
 
 class Cluster(object):
     def __init__(self):
@@ -343,8 +374,8 @@ class Cluster(object):
 @click.argument("infile", metavar="INFILENAME")
 @click.pass_context
 def gpsdio_vectortile_generate_tree(ctx, infile):
-    tree = QuadtreeNode.from_source_file(infile)
-    tree.generate_tree()
+    tree = Quadtree(infile, columns=["timestamp", "latitude", "longitude"])
+    tree.root.generate_tree()
     with open("tree.json", "w") as f:
         f.write(json.dumps(tree.serialize()))
 
@@ -353,16 +384,16 @@ def gpsdio_vectortile_generate_tree(ctx, infile):
 @click.pass_context
 def gpsdio_vectortile_generate_tiles(ctx):
     with open("tree.json") as f:
-        tree = QuadtreeNode.deserialize(json.loads(f.read()))
-    tree.generate_tiles()
+        tree = Quadtree.deserialize(json.loads(f.read()))
+    tree.root.generate_tiles()
 
 @click.command(name='vectortile-generate-headers')
 @click.pass_context
 def gpsdio_vectortile_generate_headers(ctx):
     with open("tree.json") as f:
-        tree = QuadtreeNode.deserialize(json.loads(f.read()))
-    tree.generate_header()
-    tree.generate_workspace()
+        tree = Quadtree.deserialize(json.loads(f.read()))
+    tree.root.generate_header()
+    tree.root.generate_workspace()
 
 if __name__ == '__main__':
     gpsdio_vectortile()
