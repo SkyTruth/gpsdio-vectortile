@@ -104,21 +104,23 @@ class Quadtree(object):
     def name(self):
         return self.filename.split(".")[0]
 
-    def serialize(self):
-        return {
-            "max_depth": self.max_depth,
-            "max_count": self.max_count,
-            "remove": self.remove,
-            "clustering_levels": self.clustering_levels,
-            "filename": self.filename,
-            "root": self.root.serialize()
-            }
+    def save(self):
+        with msgpack_open("tree.msg", "w") as f:
+            f.write({"max_depth": self.max_depth,
+                     "max_count": self.max_count,
+                     "remove": self.remove,
+                     "clustering_levels": self.clustering_levels,
+                     "filename": self.filename,
+                     })
+        self.root.save()
 
     @classmethod
-    def deserialize(cls, spec):
-        root = spec.pop("root")
+    def load(cls):
+        with msgpack_open("tree.msg") as f:
+            spec = f.next()
         self = cls(spec.pop("filename"), __bare__ = True, **spec)
-        self.root = QuadtreeNode.deserialize(self, root)
+        self.root = QuadtreeNode(self)
+        self.root.load()
         return self
 
 
@@ -135,33 +137,45 @@ class QuadtreeNode(object):
 
     @property
     def source_filename(self):
-        return "%s.msg" % self.bounds
+        return "%s-src.msg" % self.bounds
 
     @property
     def cluster_filename(self):
-        return "%s.cluster.msg" % self.bounds
+        return "%s-cluster.msg" % self.bounds
+
+    @property
+    def info_filename(self):
+        return "%s-info.msg" % self.bounds
 
     @property
     def tile_filename(self):
         return "%s" % self.bbox
 
-    def serialize(self):
-        return {
-            "bounds": str(self.bounds),
-            "count": self.count,
-            "hollow": self.hollow,
-            "colsByName": self.colsByName,
-            "children": self.children and [child.serialize() for child in self.children]
-            }
+    def save(self):
+        with msgpack_open(self.info_filename, "w") as f:
+            f.write({"bounds": str(self.bounds),
+                     "count": self.count,
+                     "hollow": self.hollow,
+                     "colsByName": self.colsByName
+                     })
+        if self.children is not None:
+            for child in self.children:
+                child.save()
 
-    @classmethod
-    def deserialize(cls, tree, spec):
-        children = spec.pop("children")
-        spec['bounds'] = vectortile.TileBounds(spec['bounds'])
-        self = cls(tree, **spec)
-        if children:
-            self.children = [cls.deserialize(tree, child) for child in children]
-        return self
+    def load(self):
+        with msgpack_open(self.info_filename) as f:
+            info = f.next()
+            self.count = info['count']
+            self.hollow = info['hollow']
+            self.colsByName = info['colsByName']
+        self.children = []
+        for child_bounds in self.bounds.get_children():
+            child = QuadtreeNode(self.tree, child_bounds)
+            if os.path.exists(child.info_filename):
+                self.children.append(child)
+                child.load()
+        if not self.children:
+            self.children = None
 
     def generate_children(self):
         """Generates the fours child files for this child if they don't already exist."""
@@ -510,24 +524,20 @@ class Cluster(object):
 def gpsdio_vectortile_generate_tree(ctx, infile):
     tree = Quadtree(infile)
     tree.root.generate_tree()
-    with open("tree.json", "w") as f:
-        f.write(json.dumps(tree.serialize()))
+    tree.save()
 
 
 @click.command(name='vectortile-generate-tiles')
 @click.pass_context
 def gpsdio_vectortile_generate_tiles(ctx):
-    with open("tree.json") as f:
-        tree = Quadtree.deserialize(json.loads(f.read()))
+    tree = Quadtree.load()
     tree.root.generate_tiles()
-    with open("tree.json", "w") as f:
-        f.write(json.dumps(tree.serialize()))
+    tree.save()
 
 @click.command(name='vectortile-generate-headers')
 @click.pass_context
 def gpsdio_vectortile_generate_headers(ctx):
-    with open("tree.json") as f:
-        tree = Quadtree.deserialize(json.loads(f.read()))
+    tree = Quadtree.load()
     tree.root.generate_header()
     tree.root.generate_workspace()
 
