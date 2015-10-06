@@ -86,7 +86,7 @@ class Quadtree(object):
 
         print "Loading data..."
 
-        with msgpack_open(self.root.filename, "w") as outf:
+        with msgpack_open(self.root.source_filename, "w") as outf:
             with gpsdio.open(filename) as f:
                 for row in f:
                     out_row = {}
@@ -99,6 +99,10 @@ class Quadtree(object):
                     outf.write(out_row)
                     self.root.count += 1
 
+
+    @property
+    def name(self):
+        return self.filename.split(".")[0]
 
     def serialize(self):
         return {
@@ -119,25 +123,31 @@ class Quadtree(object):
 
 
 class QuadtreeNode(object):
-    def __init__(self, tree, bounds = vectortile.TileBounds(), filename = None, count = 0, hollow = False, colsByName = None):
+    def __init__(self, tree, bounds = vectortile.TileBounds(), count = 0, hollow = False, colsByName = None):
         self.tree = tree
         self.bounds = bounds
         self.bbox = self.bounds.get_bbox()
-        self.filename = filename
-        self.tile_filename = str(self.bbox)
-        self.cluster_filename = "%s.clusters.msg" % self.bbox
         self.count = count
         self.hollow = hollow
         self.colsByName = colsByName or {}
         self.children = None
 
-        if self.filename is None:
-            self.filename = "%s.msg" % self.bounds.get_bbox()
+
+    @property
+    def source_filename(self):
+        return "%s.msg" % self.bounds
+
+    @property
+    def cluster_filename(self):
+        return "%s.cluster.msg" % self.bounds
+
+    @property
+    def tile_filename(self):
+        return "%s" % self.bbox
 
     def serialize(self):
         return {
             "bounds": str(self.bounds),
-            "filename": self.filename,
             "count": self.count,
             "hollow": self.hollow,
             "colsByName": self.colsByName,
@@ -164,11 +174,11 @@ class QuadtreeNode(object):
         self.children = [QuadtreeNode(self.tree, b)
                          for b in self.bounds.get_children()]
 
-        with msgpack_open(self.filename) as f:
-            with msgpack_open(self.children[0].filename, "w") as self.children[0].file:
-                with msgpack_open(self.children[1].filename, "w") as self.children[1].file:
-                    with msgpack_open(self.children[2].filename, "w") as self.children[2].file:
-                        with msgpack_open(self.children[3].filename, "w") as self.children[3].file:
+        with msgpack_open(self.source_filename) as f:
+            with msgpack_open(self.children[0].source_filename, "w") as self.children[0].file:
+                with msgpack_open(self.children[1].source_filename, "w") as self.children[1].file:
+                    with msgpack_open(self.children[2].source_filename, "w") as self.children[2].file:
+                        with msgpack_open(self.children[3].source_filename, "w") as self.children[3].file:
                             for row in f:
                                 for child in self.children:
                                     if self.tree.latitude_col in row and self.tree.longitude_col in row and child.bbox.contains(row[self.tree.longitude_col], row[self.tree.latitude_col]):
@@ -193,7 +203,7 @@ class QuadtreeNode(object):
                 return
         self.generate_children()
         if self.tree.remove:
-            os.unlink(self.filename)
+            os.unlink(self.source_filename)
             self.hollow = True
         for child in self.children:
             if child.count > self.tree.max_count:
@@ -236,7 +246,7 @@ class QuadtreeNode(object):
                          for cluster in clusters], {})))
 
     def generate_tile_from_source(self):
-        with msgpack_open(self.filename) as f:
+        with msgpack_open(self.source_filename) as f:
             rows = list(f)
 
         self.write_tile([Cluster.from_row(row) for row in rows])
@@ -267,16 +277,12 @@ class QuadtreeNode(object):
 
         self.write_tile(clusters.values())
 
-    @property
-    def name(self):
-        return self.filename.split(".")[0]
-    
     def generate_header(self):
         with open("header", "w") as f:
             f.write(json.dumps(
                     {"colsByName": self.colsByName,
                      "seriesTilesets": False,
-                     "tilesetName": self.name,
+                     "tilesetName": self.tree.name,
                      "tilesetVersion": "0.0.1"
                      }))
 
@@ -288,7 +294,7 @@ class QuadtreeNode(object):
             f.write(json.dumps(
                     {
                         "state": {
-                            "title": self.name,
+                            "title": self.tree.name,
                             "offset": 20,
                             "maxoffset": 100,
                             "lat": 0.0,
@@ -302,7 +308,7 @@ class QuadtreeNode(object):
                             "animations": [
                                 {
                                     "args": {
-                                        "title": self.name,
+                                        "title": self.tree.name,
                                         "visible": True,
                                         "source": {
                                             "type": "TiledBinFormat",

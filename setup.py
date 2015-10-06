@@ -67,6 +67,7 @@ setup_args = dict(
     install_requires=[
         'click>=3.0',
         'gpsdio>=0.0.2',
+        'vectortile>=1.3.3'
     ],
     keywords='AIS GIS remote sensing sort',
     license=license,
