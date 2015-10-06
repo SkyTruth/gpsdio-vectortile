@@ -16,7 +16,32 @@ import datetime
 import json
 import os.path
 import math
+import msgpack
+import contextlib
+import struct
 
+class Writer(object):
+    def __init__(self, file):
+        self.file = file
+        self.packer = msgpack.Packer()
+
+    def write(self, obj):
+        self.file.write(self.packer.pack(obj))
+
+@contextlib.contextmanager
+def msgpack_open(name, mode='r'):
+    if mode == 'r':
+        with open(name) as f:
+            yield msgpack.Unpacker(f)
+    else:
+        with open(name, mode) as f:
+            yield Writer(f)
+
+def float2bits(f):
+    return struct.unpack('>l', struct.pack('>f', f))[0]
+
+def bits2float(b):
+    return struct.unpack('>f', struct.pack('>l', b))[0]
 
 class Quadtree(object):
     max_depth = None
@@ -25,7 +50,30 @@ class Quadtree(object):
 
     clustering_levels = 6
 
-    columns = None
+    latitude_col = "lat"
+    longitude_col = "lon"
+
+    columnMap = {
+        "datetime": "timestamp",
+        "latitude": "lat",
+        "longitude": "lon",
+        "course": "course",
+        "speed": "speed",
+        "series": "track",
+        "seriesgroup": "bits2float(mmsi)"
+        }
+
+    def map_row(self, row):
+        row['row'] = row
+        out_row = {}
+        for key, expr in self.columnMap.iteritems():
+            try:
+                value = eval(expr, globals(), row)
+            except Exception, e:
+                value = None
+            out_row[key] = value
+        del row['row']
+        return out_row
 
     def __init__(self, filename, __bare__ = False, **kw):
         self.filename = filename
@@ -34,25 +82,22 @@ class Quadtree(object):
 
         if __bare__: return
 
-        self.root = QuadtreeNode(self, vectortile.TileBounds(), filename, is_source=True)
+        self.root = QuadtreeNode(self)
 
-        print "Calculating length..."
-        with gpsdio.open(self.root.filename) as f:
-            for row in f:
-                for key, value in row.iteritems():
-                    if self.columns is not None and key not in self.columns:
-                        continue
-                    if isinstance(value, datetime.datetime):
-                        value = float(value.strftime("%s"))
-                    if isinstance(value, (int, float, bool)):
-                        if key not in self.root.colsByName:
-                            self.root.colsByName[key] = {"min": value, "max": value}
-                        else:
-                            if value < self.root.colsByName[key]['min']:
-                                self.root.colsByName[key]['min'] = value
-                            if value > self.root.colsByName[key]['max']:
-                                self.root.colsByName[key]['max'] = value
-                self.root.count += 1
+        print "Loading data..."
+
+        with msgpack_open(self.root.filename, "w") as outf:
+            with gpsdio.open(filename) as f:
+                for row in f:
+                    out_row = {}
+                    for key, value in row.iteritems():
+                        if isinstance(value, datetime.datetime):
+                            value = float(value.strftime("%s")) * 1000.0
+                        if not isinstance(value, (float, int, bool)):
+                            continue
+                        out_row[key] = value
+                    outf.write(out_row)
+                    self.root.count += 1
 
 
     def serialize(self):
@@ -61,7 +106,6 @@ class Quadtree(object):
             "max_count": self.max_count,
             "remove": self.remove,
             "clustering_levels": self.clustering_levels,
-            "columns": self.columns,
             "filename": self.filename,
             "root": self.root.serialize()
             }
@@ -75,7 +119,7 @@ class Quadtree(object):
 
 
 class QuadtreeNode(object):
-    def __init__(self, tree, bounds, filename = None, count = 0, is_source = False, hollow = False, colsByName = None):
+    def __init__(self, tree, bounds = vectortile.TileBounds(), filename = None, count = 0, hollow = False, colsByName = None):
         self.tree = tree
         self.bounds = bounds
         self.bbox = self.bounds.get_bbox()
@@ -83,7 +127,6 @@ class QuadtreeNode(object):
         self.tile_filename = str(self.bbox)
         self.cluster_filename = "%s.clusters.msg" % self.bbox
         self.count = count
-        self.is_source = is_source
         self.hollow = hollow
         self.colsByName = colsByName or {}
         self.children = None
@@ -96,7 +139,6 @@ class QuadtreeNode(object):
             "bounds": str(self.bounds),
             "filename": self.filename,
             "count": self.count,
-            "is_source": self.is_source,
             "hollow": self.hollow,
             "colsByName": self.colsByName,
             "children": self.children and [child.serialize() for child in self.children]
@@ -122,14 +164,14 @@ class QuadtreeNode(object):
         self.children = [QuadtreeNode(self.tree, b)
                          for b in self.bounds.get_children()]
 
-        with gpsdio.open(self.filename) as f:
-            with gpsdio.open(self.children[0].filename, "w") as self.children[0].file:
-                with gpsdio.open(self.children[1].filename, "w") as self.children[1].file:
-                    with gpsdio.open(self.children[2].filename, "w") as self.children[2].file:
-                        with gpsdio.open(self.children[3].filename, "w") as self.children[3].file:
+        with msgpack_open(self.filename) as f:
+            with msgpack_open(self.children[0].filename, "w") as self.children[0].file:
+                with msgpack_open(self.children[1].filename, "w") as self.children[1].file:
+                    with msgpack_open(self.children[2].filename, "w") as self.children[2].file:
+                        with msgpack_open(self.children[3].filename, "w") as self.children[3].file:
                             for row in f:
                                 for child in self.children:
-                                    if 'lat' in row and 'lon' in row and child.bbox.contains(row['lon'], row['lat']):
+                                    if self.tree.latitude_col in row and self.tree.longitude_col in row and child.bbox.contains(row[self.tree.longitude_col], row[self.tree.latitude_col]):
                                         child.file.write(row)
                                         child.count += 1
                                         break
@@ -150,7 +192,7 @@ class QuadtreeNode(object):
             if max_depth == 0:
                 return
         self.generate_children()
-        if self.tree.remove and not self.is_source:
+        if self.tree.remove:
             os.unlink(self.filename)
             self.hollow = True
         for child in self.children:
@@ -169,45 +211,48 @@ class QuadtreeNode(object):
             print "Generating tile for %s using source data" % self.bbox
             self.generate_tile_from_source()
 
+    def update_colsByName(self, row):
+        for key, value in row.iteritems():
+            if key == 'datetime' and value is None:
+                import pdb
+                pdb.set_trace()
+            if key not in self.colsByName:
+                self.colsByName[key] = {"min": value, "max": value}
+            else:
+                if value < self.colsByName[key]['min']:
+                    self.colsByName[key]['min'] = value
+                if value > self.colsByName[key]['max']:
+                    self.colsByName[key]['max'] = value
+        return row
+
     def write_tile(self, clusters):
-        with gpsdio.open(self.cluster_filename, "w") as f:
+        with msgpack_open(self.cluster_filename, "w") as f:
             for cluster in clusters:
                 f.write(cluster.get_cluster_row())
 
         with open(self.tile_filename, "w") as f:
-            def get_row(cluster):
-                row = cluster.get_row()
-                if self.tree.columns is not None:
-                    row = {key: value
-                           for key, value in row.iteritems()
-                           if key in self.tree.columns}
-                return row
-
             f.write(str(vectortile.Tile.fromdata(
-                        [get_row(cluster)
+                        [self.update_colsByName(self.tree.map_row(cluster.get_row()))
                          for cluster in clusters], {})))
 
     def generate_tile_from_source(self):
-        with gpsdio.open(self.filename) as f:
+        with msgpack_open(self.filename) as f:
             rows = list(f)
-        
-        if self.tree.columns is not None:
-            rows = [{key: value
-                     for (key, value) in row.iteritems()
-                     if key in self.tree.columns}
-                    for row in rows]
 
         self.write_tile([Cluster.from_row(row) for row in rows])
 
     def generate_tile_from_child_tiles(self):
         clusters = {}
         for child in self.children:
-            with open(child.tile_filename) as f:
-                header, data = vectortile.Tile(f.read()).unpack()
-                for row in data:
-                    gridcode = str(vectortile.TileBounds.from_point(row['lon'], row['lat'], self.bounds.zoom_level + self.tree.clustering_levels))
-                    if gridcode not in clusters: clusters[gridcode] = Cluster()
-                    clusters[gridcode] += row
+            with msgpack_open(child.cluster_filename) as f:
+                for row in f:
+                    cluster = Cluster.from_cluster_row(row)
+                    row = cluster.get_row()
+                    gridcode = str(vectortile.TileBounds.from_point(row[self.tree.longitude_col], row[self.tree.latitude_col], self.bounds.zoom_level + self.tree.clustering_levels))
+                    if gridcode not in clusters:
+                        clusters[gridcode] = cluster
+                    else:
+                        clusters[gridcode] += cluster
 
         # Merge clusters until we have few enough for a tile
         while len(clusters) > self.tree.max_count:
@@ -236,8 +281,8 @@ class QuadtreeNode(object):
                      }))
 
     def generate_workspace(self):
-        time = datetime.datetime.fromtimestamp((self.colsByName['timestamp']['min'] + self.colsByName['timestamp']['max']) / 2.0).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        timeExtent = (self.colsByName['timestamp']['max'] - self.colsByName['timestamp']['min']) / 10
+        time = datetime.datetime.fromtimestamp((self.colsByName['datetime']['min'] + self.colsByName['datetime']['max']) / 2.0 / 1000.0).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        timeExtent = (self.colsByName['datetime']['max'] - self.colsByName['datetime']['min']) / 10
 
         with open("workspace", "w") as f:
             f.write(json.dumps(
@@ -264,6 +309,35 @@ class QuadtreeNode(object):
                                             "args": {
                                                 "url": "./"
                                                 }
+                                            },
+                                        "columns": {
+                                            "longitude":{"type":"Float32",
+                                                         "hidden":True,
+                                                         "source":{"longitude":1}},
+                                            "latitude":{"type":"Float32",
+                                                        "hidden":True,
+                                                        "source":{"latitude":1}},
+                                            "sigma":{"type":"Float32",
+                                                     "source":{"sigma":1},
+                                                     "min":0,
+                                                     "max":1},
+                                            "weight":{"type":"Float32",
+                                                      "source":{"speed":1},
+                                                      "min":0,
+                                                      "max":1},
+                                            "time":{"type":"Float32",
+                                                    "hidden":True,
+                                                    "source":{"datetime":1}},
+                                            "filter":{"type":"Float32",
+                                                      "source":{"_":None,
+                                                                "timerange":-1,
+                                                                "active_category":-1}},
+                                            "selected":{"type":"Float32",
+                                                        "hidden":True,
+                                                        "source":{"selected":1}},
+                                            "hover":{"type":"Float32",
+                                                     "hidden":True,
+                                                     "source":{"hover":1}}
                                             },
                                         "selections": {
                                             "selected": {
@@ -345,9 +419,37 @@ class Cluster(object):
 
     def _add_col(self, name):
         if name not in self.counts:
-            self.counts[name] = 0
-            self.sums[name] = 0
-            self.sqr_sums[name] = 0
+            self.counts[name] = 0.0
+            self.sums[name] = 0.0
+            self.sqr_sums[name] = 0.0
+
+    # def __add__(self, other):
+    #     res = type(self)()
+
+    #     res.a = self
+    #     res.b = other
+
+    #     res.counts = dict(self.counts)
+    #     res.sums = dict(self.sums)
+    #     res.sqr_sums = dict(self.sqr_sums)
+
+    #     if isinstance(other, Cluster):
+    #         for key in other.counts.iterkeys():
+    #             res._add_col(key)
+    #             res.counts[key] += other.counts[key]
+    #             res.sums[key] += other.sums[key]
+    #             res.sqr_sums[key] += other.sqr_sums[key]
+
+    #     else:
+    #         for key, value in other.iteritems():
+    #             if isinstance(value, datetime.datetime):
+    #                 value = float(value.strftime("%s"))
+    #             if not isinstance(value, (int, float, bool)): continue
+    #             res._add_col(key)
+    #             res.counts[key] += 1.0
+    #             res.sums[key] += value
+    #             res.sqr_sums[key] += value**2
+    #     return res
 
     def __iadd__(self, other):
         if isinstance(other, Cluster):
@@ -363,7 +465,7 @@ class Cluster(object):
                     value = float(value.strftime("%s"))
                 if not isinstance(value, (int, float, bool)): continue
                 self._add_col(key)
-                self.counts[key] += 1
+                self.counts[key] += 1.0
                 self.sums[key] += value
                 self.sqr_sums[key] += value**2
         return self
@@ -380,15 +482,27 @@ class Cluster(object):
         res = {}
         for key in self.counts.iterkeys():            
             res[key] = self.sums[key] / self.counts[key]
-            res[key + "_stddev"] =  math.sqrt(self.sqr_sums[key]/self.counts[key] - (self.sums[key]/self.counts[key])**2)
+            var = self.sqr_sums[key]/self.counts[key] - (self.sums[key]/self.counts[key])**2
+            # Handle overflow and precission underflow
+            if var < 0.0:
+                if var < -1.0e-5:
+                    continue
+                var = 0
+            res[key + "_stddev"] =  math.sqrt(var)
         return res
 
+    def format(self, key, indent = ''):
+        res = "%scount=%s, sum=%s, sqr_sum=%s" % (indent, self.counts[key], self.sums[key], self.sqr_sums[key])
+        if hasattr(self, "a"):
+            res += "\n" + self.a.format(key, indent + '  ')
+            res += "\n" + self.b.format(key, indent + '  ')
+        return res
 
 @click.command(name='vectortile-generate-tree')
 @click.argument("infile", metavar="INFILENAME")
 @click.pass_context
 def gpsdio_vectortile_generate_tree(ctx, infile):
-    tree = Quadtree(infile, columns=["timestamp", "lat", "lon", "course", "speed"])
+    tree = Quadtree(infile)
     tree.root.generate_tree()
     with open("tree.json", "w") as f:
         f.write(json.dumps(tree.serialize()))
@@ -400,6 +514,8 @@ def gpsdio_vectortile_generate_tiles(ctx):
     with open("tree.json") as f:
         tree = Quadtree.deserialize(json.loads(f.read()))
     tree.root.generate_tiles()
+    with open("tree.json", "w") as f:
+        f.write(json.dumps(tree.serialize()))
 
 @click.command(name='vectortile-generate-headers')
 @click.pass_context
