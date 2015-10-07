@@ -29,8 +29,8 @@ def gpsdio_vectortile_generate_tiles(ctx):
 @click.pass_context
 def gpsdio_vectortile_generate_headers(ctx):
     tree = quad_tree.Quadtree.load()
-    tree.root.generate_header()
-    tree.root.generate_workspace()
+    tree.generate_header()
+    tree.generate_workspace()
 
 if __name__ == '__main__':
     gpsdio_vectortile()
