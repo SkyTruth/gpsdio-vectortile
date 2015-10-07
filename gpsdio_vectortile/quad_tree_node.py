@@ -5,12 +5,11 @@ import cluster as cluster_mod
 import utils
 
 class QuadtreeNode(object):
-    def __init__(self, tree, bounds = vectortile.TileBounds(), count = 0, hollow = False, colsByName = None):
+    def __init__(self, tree, bounds = vectortile.TileBounds(), count = 0, colsByName = None):
         self.tree = tree
         self.bounds = bounds
         self.bbox = self.bounds.get_bbox()
         self.count = count
-        self.hollow = hollow
         self.colsByName = colsByName or {}
         self.children = None
 
@@ -35,7 +34,6 @@ class QuadtreeNode(object):
         with utils.msgpack_open(self.info_filename, "w") as f:
             f.write({"bounds": str(self.bounds),
                      "count": self.count,
-                     "hollow": self.hollow,
                      "colsByName": self.colsByName
                      })
         if self.children is not None:
@@ -46,7 +44,6 @@ class QuadtreeNode(object):
         with utils.msgpack_open(self.info_filename) as f:
             info = f.next()
             self.count = info['count']
-            self.hollow = info['hollow']
             self.colsByName = info['colsByName']
         self.children = []
         for child_bounds in self.bounds.get_children():
@@ -98,7 +95,6 @@ class QuadtreeNode(object):
         self.generate_children()
         if self.tree.remove:
             os.unlink(self.source_filename)
-            self.hollow = True
         for child in self.children:
             if child.count > self.tree.max_count:
                 child.generate_tree(max_depth)
@@ -117,9 +113,6 @@ class QuadtreeNode(object):
 
     def update_colsByName(self, row):
         for key, value in row.iteritems():
-            if key == 'datetime' and value is None:
-                import pdb
-                pdb.set_trace()
             if key not in self.colsByName:
                 self.colsByName[key] = {"min": value, "max": value}
             else:
@@ -135,9 +128,12 @@ class QuadtreeNode(object):
                 f.write(cluster.get_cluster_row())
 
         with open(self.tile_filename, "w") as f:
-            f.write(str(vectortile.Tile.fromdata(
-                        [self.update_colsByName(self.tree.map_row(cluster.get_row()))
-                         for cluster in clusters], {})))
+            data = [self.update_colsByName(self.tree.map_row(cluster.get_row()))
+                    for cluster in clusters]
+            f.write(str(
+                    vectortile.Tile.fromdata(
+                        data,
+                        {"colsByName": self.colsByName})))
 
     def generate_tile_from_source(self):
         with utils.msgpack_open(self.source_filename) as f:
